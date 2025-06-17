@@ -119,7 +119,6 @@ struct _AllocationMetadata {
     size_t size;
     CUdevice device;
     CUmemGenericAllocationHandle allocHandle;
-    std::string tag;
 };
 
 class TorchMemorySaver {
@@ -138,7 +137,7 @@ public:
 
         {
             const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
-            allocation_metadata_.emplace(*ptr, _AllocationMetadata{size, device, allocHandle, tag});
+            allocation_metadata_[tag].emplace(*ptr, _AllocationMetadata{size, device, allocHandle});
         }
 
 #ifdef TMS_DEBUG_LOG
@@ -151,13 +150,15 @@ public:
         return cudaSuccess;
     }
 
-    cudaError_t free(void *ptr) {
+    cudaError_t free(void *ptr, const std::string& tag) {
         _AllocationMetadata metadata;
         {
             const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
-            SIMPLE_CHECK(allocation_metadata_.count(ptr), "Trying to free a pointer not allocated here");
-            metadata = allocation_metadata_[ptr];
-            allocation_metadata_.erase(ptr);
+            SIMPLE_CHECK(allocation_metadata_.count(tag), "No allocation found for this tag.");
+            SIMPLE_CHECK(allocation_metadata_[tag].count(ptr), "Trying to free a pointer not allocated here");
+            auto inner_metadata = allocation_metadata_[tag];
+            inner_metadata.erase(ptr);
+
         }
 
         CURESULT_CHECK(cuMemUnmap((CUdeviceptr) ptr, metadata.size));
@@ -177,13 +178,10 @@ public:
     void pause(const std::string& tag) {
         const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
 
-        for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
+        auto inner_metadata = allocation_metadata_[tag];
+        for (auto it = inner_metadata.begin(); it != inner_metadata.end(); ++it) {
             void *ptr = it->first;
             _AllocationMetadata metadata = it->second;
-
-            if (!tag.empty() && metadata.tag != tag) {
-                continue;
-            }
 
             CURESULT_CHECK(cuMemUnmap((CUdeviceptr) ptr, metadata.size));
             CURESULT_CHECK(cuMemRelease(metadata.allocHandle));
@@ -191,7 +189,7 @@ public:
 #ifdef TMS_DEBUG_LOG
             std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.pause"
                       << " ptr=" << ptr << " metadata.size=" << metadata.size << " metadata.allocHandle="
-                      << metadata.allocHandle << " tag=" << metadata.tag << " filter_tag=" << tag
+                      << metadata.allocHandle << " tag=" << tag
                       << std::endl;
 #endif
         }
@@ -200,13 +198,10 @@ public:
     void resume(const std::string& tag) {
         const std::lock_guard <std::mutex> lock(allocator_metadata_mutex_);
 
-        for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
+        auto inner_metadata = allocation_metadata_[tag];
+        for (auto it = inner_metadata.begin(); it != inner_metadata.end(); ++it) {
             void *ptr = it->first;
             _AllocationMetadata &metadata = it->second;
-
-            if (!tag.empty() && metadata.tag != tag) {
-                continue;
-            }
 
             CUmemGenericAllocationHandle newAllocHandle;
             CUDAUtils::cu_mem_create(&newAllocHandle, metadata.size, metadata.device);
@@ -219,7 +214,7 @@ public:
             std::cout << "[torch_memory_saver.cpp] TorchMemorySaver.resume"
                       << " ptr=" << ptr << " metadata.size=" << metadata.size << " (old)metadata.allocHandle="
                       << metadata.allocHandle
-                      << " (new)newAllocHandle=" << newAllocHandle << " tag=" << metadata.tag << " filter_tag=" << tag
+                      << " (new)newAllocHandle=" << newAllocHandle << " tag=" << tag
                       << std::endl;
 #endif
 
@@ -235,7 +230,7 @@ public:
 
 private:
     std::mutex allocator_metadata_mutex_;
-    std::unordered_map<void *, _AllocationMetadata> allocation_metadata_;
+    std::unordered_map<std::string, std::unordered_map<void *, _AllocationMetadata>> allocation_metadata_;
 };
 
 
@@ -284,7 +279,7 @@ cudaError_t cudaMalloc(void **ptr, size_t size) {
 
 cudaError_t cudaFree(void *ptr) {
     if (RegionManager::is_interesting_region()) {
-        return TorchMemorySaver::instance().free(ptr);
+        return TorchMemorySaver::instance().free(ptr, RegionManager::get_current_tag());
     } else {
         return APIForwarder::call_real_cuda_free(ptr);
     }
