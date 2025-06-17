@@ -303,12 +303,12 @@ void tms_set_current_tag(const char* tag) {
 }
 
 void tms_pause(const char* tag) {
-    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
+    std::string tag_str = (tag != nullptr) ? std::string(tag) : "default";
     TorchMemorySaver::instance().pause(tag_str);
 }
 
 void tms_resume(const char* tag) {
-    std::string tag_str = (tag != nullptr) ? std::string(tag) : "";
+    std::string tag_str = (tag != nullptr) ? std::string(tag) : "default";
     TorchMemorySaver::instance().resume(tag_str);
 }
 }
